@@ -44,11 +44,15 @@ def create_socket(ip, port, timeout):
     except Exception:
         return None
 
-def get_apache_banner(sock):
+def get_apache_version(sock):
     try:
         sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
         banner = sock.recv(1024).decode(errors='ignore').strip()
-        return banner
+        # Extract Apache version from the banner
+        if "Server: Apache" in banner:
+            for line in banner.splitlines():
+                if line.startswith("Server: Apache"):
+                    return line.split("Server: ")[1]
     except Exception:
         return None
     finally:
@@ -60,10 +64,10 @@ def scan_ip(ip, port, timeout, results):
 
     sock = create_socket(ip, port, timeout)
     if sock:
-        banner = get_apache_banner(sock)
-        if banner and "Apache" in banner:  # Check if Apache is running
+        apache_version = get_apache_version(sock)
+        if apache_version:  # Only store results if Apache is found
             with progress_lock:
-                results[ip] = banner
+                results[ip] = apache_version
     with progress_lock:
         progress_counter += 1
         print(f"\r{GREEN}Progress: {progress_counter}/{total_ips} IPs checked{ENDC}", end="")
@@ -140,21 +144,16 @@ def main():
     # Display results
     if results:
         print(f"\n{GREEN}Apache Servers Found:{ENDC}")
-        for ip, banner in results.items():
-            print(f"{BLUE}{'=' * 40}{ENDC}")
-            print(f"{GREEN}[+] IP: {ip}{ENDC}")
-            print(f"    {GREEN}Port 443{ENDC}: {banner}")
-            print(f"{BLUE}{'=' * 40}{ENDC}")
+        for ip, version in results.items():
+            print(f"{GREEN}[+] IP: {ip}{ENDC} - {version}")
     else:
         print(f"{RED}[!] No Apache servers found{ENDC}")
 
     # Save results to a file if specified
     if args.output:
         with open(args.output, 'w') as file:
-            for ip, banner in results.items():
-                file.write(f"IP: {ip}\n")
-                file.write(f"  Port 443: {banner}\n")
-                file.write("=" * 40 + "\n")
+            for ip, version in results.items():
+                file.write(f"IP: {ip} - {version}\n")
         print(f"{GREEN}[+] Results saved to {args.output}{ENDC}")
 
 if __name__ == "__main__":
