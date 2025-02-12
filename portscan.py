@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-
 import socket
 import argparse
 import ipaddress
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "2.1"
+VERSION = "1.3"
 
 # Colors for output
 BLUE = "\033[94m"
@@ -18,7 +17,7 @@ ENDC = "\033[0m"
 # Global variables for progress tracking
 progress_lock = threading.Lock()
 progress_counter = 0
-total_ips = 0
+total_scans = 0
 
 def display_banner():
     banner = rf"""
@@ -30,7 +29,7 @@ def display_banner():
    \______  (____  /\_/ \____|__  /\_______  /                 
           \/     \/             \/         \/                  
 {ENDC}
-   Port Scanner v{VERSION} - Scan Critical Ports
+   Comprehensive Port Scanner v{VERSION}
 """
     print(banner)
 
@@ -44,30 +43,53 @@ def create_socket(ip, port, timeout):
     except Exception:
         return None
 
-def get_service_banner(sock):
+def get_port_service(port):
+    """Return the common service name for a given port."""
+    common_ports = {
+        21: "FTP",
+        22: "SSH",
+        25: "SMTP",
+        110: "POP3",
+        143: "IMAP",
+        465: "SMTPS",
+        993: "IMAPS",
+        995: "POP3S",
+        3306: "MySQL",
+    }
+    return common_ports.get(port, "Unknown")
+
+def get_server_banner(sock):
+    """Retrieve the server banner for the service."""
     try:
-        sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
+        sock.send(b"\r\n")
         banner = sock.recv(1024).decode(errors='ignore').strip()
         return banner
     except Exception:
-        return "No banner retrieved"
+        return None
     finally:
         sock.close()
 
-def scan_ip(ip, ports, timeout, results):
-    """Scan an IP for open ports and gather results."""
-    global progress_counter
+def scan_ip_port(ip, port, timeout, results):
+    """Scan a specific port for a given IP."""
+    sock = create_socket(ip, port, timeout)
+    if sock:
+        banner = get_server_banner(sock)
+        if banner:  # Service detected
+            with progress_lock:
+                results[ip].append((port, banner))
+                print(f"\n{GREEN}[+] IP: {ip} - Port: {port} ({get_port_service(port)}) is open - Service: {banner}{ENDC}")
+        sock.close()
 
-    ip_results = []
-    for port in ports:
-        sock = create_socket(ip, port, timeout)
-        if sock:
-            banner = get_service_banner(sock)
-            ip_results.append((port, banner))
-    with progress_lock:
-        results[ip] = ip_results
-        progress_counter += 1
-        print(f"\r{GREEN}Progress: {progress_counter}/{total_ips} IPs checked{ENDC}", end="")
+def scan_port(ips, port, timeout, results):
+    """Scan a specific port across all IPs."""
+    global progress_counter
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = [executor.submit(scan_ip_port, ip, port, timeout, results) for ip in ips]
+        for future in futures:
+            future.result()
+            with progress_lock:
+                progress_counter += 1
+                print(f"\r{GREEN}Progress: {progress_counter}/{total_scans} scans completed{ENDC}", end="")
 
 def process_ip_list(ip_list_file):
     """Process a file containing a list of IPs or CIDR ranges."""
@@ -89,16 +111,16 @@ def process_ip_list(ip_list_file):
     return ips
 
 def main():
-    global total_ips
+    global total_scans
     display_banner()
 
-    parser = argparse.ArgumentParser(description="Port Scanner for important services.")
+    parser = argparse.ArgumentParser(description="Comprehensive Port Scanner for common ports.")
     parser.add_argument(
         "targets", nargs='*', help="IP addresses, domain names, or CIDR networks to scan."
     )
     parser.add_argument(
-        "-p", "--ports", type=str, default="21,22,23,25,53,80,110,139,443,3306",
-        help="Comma-separated list of port numbers to scan (default: 21,22,23,25,53,80,110,139,443,3306) or use '-p-' to scan all ports."
+        "-p", "--ports", type=int, nargs='+', default=[21, 22, 25, 110, 143, 465, 993, 995, 3306],
+        help="Ports to scan (default: common ports)."
     )
     parser.add_argument(
         "-t", "--timeout", type=float, default=1.0, help="Connection timeout in seconds (default: 1 second)."
@@ -111,10 +133,7 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.ports == '-':
-        ports = range(1, 65536)  # Scan all ports
-    else:
-        ports = [int(p) for p in args.ports.split(',')]
+    ports = args.ports
     timeout = args.timeout
 
     # Process targets
@@ -136,41 +155,19 @@ def main():
         return
 
     ips = list(ips)
-    total_ips = len(ips)
+    total_scans = len(ips) * len(ports)
 
-    results = {}
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        for ip in ips:
-            executor.submit(scan_ip, ip, ports, timeout, results)
-
-    executor.shutdown(wait=True)
-
-    # Display results
-    if results:
-        print(f"\n{GREEN}Scan Results:{ENDC}")
-        for ip, ip_results in results.items():
-            print(f"{BLUE}{'=' * 40}{ENDC}")
-            print(f"{GREEN}[+] IP: {ip}{ENDC}")
-            if ip_results:
-                for port, banner in ip_results:
-                    print(f"    {GREEN}Port {port}{ENDC}: {banner}")
-            else:
-                print(f"    {ORANGE}[!] No open ports found{ENDC}")
-            print(f"{BLUE}{'=' * 40}{ENDC}")
-    else:
-        print(f"{RED}[!] No results found{ENDC}")
+    results = {ip: [] for ip in ips}
+    for port in ports:
+        print(f"\n{ORANGE}Scanning port {port} ({get_port_service(port)})...{ENDC}")
+        scan_port(ips, port, timeout, results)
 
     # Save results to a file if specified
     if args.output:
         with open(args.output, 'w') as file:
-            for ip, ip_results in results.items():
-                file.write(f"IP: {ip}\n")
-                if ip_results:
-                    for port, banner in ip_results:
-                        file.write(f"  Port {port}: {banner}\n")
-                else:
-                    file.write(f"  No open ports found\n")
-                file.write("=" * 40 + "\n")
+            for ip, open_ports in results.items():
+                if open_ports:
+                    file.write(f"IP: {ip} - Open Ports: {', '.join(f'{port} ({get_port_service(port)}) - Service: {banner}' for port, banner in open_ports)}\n")
         print(f"{GREEN}[+] Results saved to {args.output}{ENDC}")
 
 if __name__ == "__main__":
