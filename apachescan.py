@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import time
 import socket
 import argparse
 import ipaddress
@@ -30,7 +30,7 @@ def display_banner():
    \______  (____  /\_/ \____|__  /\_______  /                 
           \/     \/             \/         \/                  
 {ENDC}
-   Apache Server Scanner v{VERSION} - Scan Port 443
+   Apache Server Scanner v{VERSION} - Scan Port 80,443
 """
     print(banner)
 
@@ -44,30 +44,34 @@ def create_socket(ip, port, timeout):
     except Exception:
         return None
 
-def get_apache_version(sock):
+def get_server_banner(sock):
+    """Retrieve the server banner and check if it's Apache."""
     try:
         sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
         banner = sock.recv(1024).decode(errors='ignore').strip()
-        # Extract Apache version from the banner
+        # Check if the server is Apache
         if "Server: Apache" in banner:
             for line in banner.splitlines():
-                if line.startswith("Server: Apache"):
+                if line.startswith("Server: "):
                     return line.split("Server: ")[1]
     except Exception:
         return None
     finally:
         sock.close()
 
-def scan_ip(ip, port, timeout, results):
-    """Scan an IP for Apache server on port 443."""
+def scan_ip(ip, ports, timeout, results):
+    """Scan an IP for Apache server on specified ports."""
     global progress_counter
 
-    sock = create_socket(ip, port, timeout)
-    if sock:
-        apache_version = get_apache_version(sock)
-        if apache_version:  # Only store results if Apache is found
-            with progress_lock:
-                results[ip] = apache_version
+    for port in ports:
+        sock = create_socket(ip, port, timeout)
+        if sock:
+            banner = get_server_banner(sock)
+            if banner:  # Apache server found
+                with progress_lock:
+                    results[ip] = banner
+                    print(f"\n{GREEN}[+] IP: {ip} - {banner}{ENDC}")
+                    break  # Stop scanning other ports if Apache is found
     with progress_lock:
         progress_counter += 1
         print(f"\r{GREEN}Progress: {progress_counter}/{total_ips} IPs checked{ENDC}", end="")
@@ -95,7 +99,7 @@ def main():
     global total_ips
     display_banner()
 
-    parser = argparse.ArgumentParser(description="Apache Server Scanner for port 443.")
+    parser = argparse.ArgumentParser(description="Apache Server Scanner for port 80,443.")
     parser.add_argument(
         "targets", nargs='*', help="IP addresses, domain names, or CIDR networks to scan."
     )
@@ -110,7 +114,7 @@ def main():
     )
 
     args = parser.parse_args()
-    port = 443  # Only scan port 443
+    ports = [80, 443]  # Scan both port 80 and 443
     timeout = args.timeout
 
     # Process targets
@@ -137,17 +141,9 @@ def main():
     results = {}
     with ThreadPoolExecutor(max_workers=100) as executor:
         for ip in ips:
-            executor.submit(scan_ip, ip, port, timeout, results)
+            executor.submit(scan_ip, ip, ports, timeout, results)
 
     executor.shutdown(wait=True)
-
-    # Display results
-    if results:
-        print(f"\n{GREEN}Apache Servers Found:{ENDC}")
-        for ip, version in results.items():
-            print(f"{GREEN}[+] IP: {ip}{ENDC} - {version}")
-    else:
-        print(f"{RED}[!] No Apache servers found{ENDC}")
 
     # Save results to a file if specified
     if args.output:
